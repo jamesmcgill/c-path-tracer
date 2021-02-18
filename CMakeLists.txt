@@ -3,8 +3,8 @@
 #
 cmake_minimum_required (VERSION 3.8)
 
-project ("c-path-tracer")
+project ("path-tracer")
 set(CMAKE_C_STANDARD 11)
 
 # Include sub-projects.
-add_subdirectory ("c-path-tracer")
+add_subdirectory ("path-tracer")
