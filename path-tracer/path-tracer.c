@@ -90,6 +90,16 @@ Vec3 subtract_vec3(const Vec3 lhs, const Vec3 rhs)
     };
 }
 
+Vec3 multiply_vec3(const Vec3 lhs, const Vec3 rhs)
+{
+    return (Vec3)
+    {
+        .x = lhs.x * rhs.x,
+        .y = lhs.y * rhs.y,
+        .z = lhs.z * rhs.z,
+    };
+}
+
 Vec3 scale_vec3(const Vec3 v, const f32 scale)
 {
     return (Vec3)
@@ -159,7 +169,7 @@ typedef struct xorshift128p_state {
 } rand_state;
 
 /* The state must be seeded so that it is not all zero */
-static uint64_t xorshift128p(rand_state* state)
+uint64_t xorshift128p(rand_state* state)
 {
     uint64_t t = state->a;
     uint64_t const s = state->b;
@@ -179,19 +189,19 @@ rand_state create_rand_state(void)
     return state;
 }
 
-static f32 rand_f32(rand_state* state)
+f32 rand_f32(rand_state* state)
 {
     u32 r = xorshift128p(state);
     return r / (f32)UINT32_MAX;
 }
 
-static f32 rand_f32_range(rand_state* state, f32 min, f32 max)
+f32 rand_f32_range(rand_state* state, f32 min, f32 max)
 {
     const f32 range = max - min;
     return (rand_f32(state) * range) + min;
 }
 
-static Vec3 rand_vec3_in_unit_sphere(rand_state* state)
+Vec3 rand_vec3_in_unit_sphere(rand_state* state)
 {
     Vec3 p;
     while (true)
@@ -204,7 +214,7 @@ static Vec3 rand_vec3_in_unit_sphere(rand_state* state)
     return p;
 }
 
-static Vec3 rand_vec3_in_unit_disc(rand_state* state)
+Vec3 rand_vec3_in_unit_disc(rand_state* state)
 {
     Vec3 p;
     while (true)
@@ -225,12 +235,118 @@ typedef struct {
     Vec3 direction;
 } Ray;
 
+Vec3 ray_at_t(const Ray ray, const f32 t)
+{
+    return add_vec3(ray.origin, scale_vec3(ray.direction, t));
+}
+
+//------------------------------------------------------------------------------
+typedef struct
+{
+    Vec3 point;
+    Vec3 surface_normal;
+//  Material* material_ptr;
+    f32 t;
+    bool front_face;
+} HitInfo;
+
+typedef struct
+{
+    Ray ray;
+    Vec3 attenuation;
+} ScatterInfo;
+
 //------------------------------------------------------------------------------
 // Scene 
 //------------------------------------------------------------------------------
 typedef struct {
     Vec3 position;
 } Scene;
+
+//------------------------------------------------------------------------------
+typedef struct
+{
+    Vec3 position;
+    f32 radius;
+//  Material material;
+} Sphere;
+
+//----------------------------------------------------------------------------
+bool is_in_range(const f32 val, const f32 min, const f32 max)
+{
+    if (val < min) { return false; }
+    if (val > max) { return false; }
+    return true;
+}
+
+//----------------------------------------------------------------------------
+bool select_closest_t(f32* closest_t, f32 t1, f32 t2, f32 t_min, f32 t_max)
+{
+    const bool is_t1_valid = is_in_range(t1, t_min, t_max);
+    const bool is_t2_valid = is_in_range(t2, t_min, t_max);
+
+    if (!is_t1_valid && !is_t2_valid)
+    {
+        return false;
+    }
+    else if (!is_t2_valid)
+    {
+        *closest_t = t1;
+    }
+    else if (!is_t1_valid)
+    {
+        *closest_t = t2;
+    }
+    else if (t1 < t2)
+    {
+        *closest_t = t1;
+    }
+    else
+    {
+        *closest_t = t2;
+    }
+    return true;
+}
+
+//------------------------------------------------------------------------------
+bool hit_test(
+    HitInfo* hit_info,
+    const Sphere sphere,
+    const Ray ray,
+    const f32 t_min,
+    const f32 t_max)
+{
+    const f32 radius_sq = (sphere.radius * sphere.radius);
+    const Vec3 displacement = subtract_vec3(ray.origin, sphere.position);
+
+    const f32 a      = length_squared_vec3(ray.direction);
+    const f32 half_b = dot_vec3(displacement, ray.direction);
+    const f32 c      = length_squared_vec3(displacement) - radius_sq;
+
+    const f32 discriminant = (half_b * half_b) - (a * c);
+    if (discriminant < 0.0) { return false; }
+
+    const f32 discrim_root = sqrtf(discriminant);
+    const f32 t1 = (-half_b - discrim_root) / a;
+    const f32 t2 = (-half_b + discrim_root) / a;
+
+    f32 t;
+    if (select_closest_t(&t, t1, t2, t_min, t_max))
+    {
+        const Vec3 point_at_t = ray_at_t(ray, t);
+        Vec3 outward_normal = subtract_vec3(point_at_t, sphere.position);
+        outward_normal = scale_vec3(outward_normal, 1.0f / sphere.radius);
+
+        hit_info->point = point_at_t;
+        hit_info->t = t;
+        hit_info->surface_normal = outward_normal;
+        hit_info->front_face = dot_vec3(outward_normal, ray.direction) < 0.0;
+        //hit_info->material_ptr = &self.material;
+        return true;
+    }
+    return false;
+}
+
 
 //----------------------------------------------------------------------------
 // Camera
@@ -326,8 +442,91 @@ Ray generate_ray(const Camera camera, const i32 x, const i32 y, rand_state* rand
 }
 
 //------------------------------------------------------------------------------
-Vec3 calc_color(const Ray ray, const Scene* scene, rand_state* rand_state)
+Vec3 calc_color(
+    const Ray ray,
+    const Scene* scene,
+    rand_state* rand_state,
+    u32 call_depth)
 {
+    if (call_depth > 50)
+    {
+        return (Vec3) {.x = 0.0, .y = 0.0, .z = 0.0};
+    }
+
+    // TODO: real scene data
+    i32 num_spheres = 1;
+    Sphere spheres[1] =
+    {
+        (Sphere){.position = { 0.0f, 0.0f, 0.0f }, .radius = 10.0f }
+    };
+
+    // Test all objects in the scene
+    bool hit_something = false;
+    f32 closest_t = 99999.0f;   // TODO: math.f32_max;
+    HitInfo hit_info;
+    for (i32 i = 0; i < num_spheres; ++i)
+    {
+        HitInfo current_info;
+        if (hit_test(&current_info, spheres[i], ray, 0.001, closest_t))
+        {
+            hit_something = true;
+            closest_t = current_info.t;
+            hit_info = current_info;  // TODO: do I really need to deep copy?
+        }
+    }
+
+    if (hit_something)
+    {
+        bool is_scattered = false;
+        ScatterInfo scatter_info;
+
+        // TODO: this is temp code. similar to lambertian
+        const Vec3 normal_sphere_pos =
+            add_vec3(hit_info.point, hit_info.surface_normal);
+        const Vec3 reflect_point =
+            add_vec3(normal_sphere_pos, rand_vec3_in_unit_sphere(rand_state));
+
+        scatter_info.ray = (Ray)
+        {
+            .origin = hit_info.point,
+            .direction = subtract_vec3(reflect_point, hit_info.point),
+        },
+        scatter_info.attenuation = (Vec3) { 0.1f, 0.2f, 0.2f },
+        is_scattered = true;
+
+/*
+        switch (hit_info.material_type)
+        {
+        case MaterialTag.Lambertian:
+            is_scattered = labertian_scatter(
+                &scatter_info, ray, &hit_info, rand_state);
+            break;
+        case MaterialTag.Metal:
+            is_scattered = metal_scatter(
+                &scatter_info, ray, &hit_info, rand_state);
+            break;
+        case MaterialTag.Dielectric:
+            is_scattered = dielectric_scatter(
+                &scatter_info, ray, &hit_info, rand_state);
+            break;
+        };
+*/
+        if (is_scattered)
+        {
+            Vec3 color = calc_color(
+                scatter_info.ray,
+                scene,
+                rand,
+                call_depth + 1
+            );
+            return multiply_vec3(color, scatter_info.attenuation);
+        }
+        else
+        {
+            return (Vec3){.x = 0.0, .y = 0.0, .z = 0.0};
+        }
+    } // hit_something
+
     // Draw background sky gradient
     const Vec3 unit_direction = normalize_vec3(ray.direction);
     const f32 t = (unit_direction.y + 1.0f) * 0.5f;
@@ -387,7 +586,7 @@ int main()
             for (i32 sample = 0; sample < NUM_SAMPLES; ++sample)
             {
                 const Ray ray        = generate_ray(camera, x, y, &rand_state);
-                const Vec3 ray_color = calc_color(ray, &scene, &rand_state);
+                const Vec3 ray_color = calc_color(ray, &scene, &rand_state, 0);
                 accumulated_color    = add_vec3(accumulated_color, ray_color);
             } // sample
 
