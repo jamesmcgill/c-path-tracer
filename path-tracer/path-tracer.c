@@ -152,6 +152,72 @@ Vec3 clamp_vec3(const Vec3 v)
 }
 
 //------------------------------------------------------------------------------
+// Random
+//------------------------------------------------------------------------------
+typedef struct xorshift128p_state {
+  uint64_t a, b;
+} rand_state;
+
+/* The state must be seeded so that it is not all zero */
+static uint64_t xorshift128p(rand_state* state)
+{
+    uint64_t t = state->a;
+    uint64_t const s = state->b;
+    state->a = s;
+    t ^= t << 23;		// a
+    t ^= t >> 17;		// b
+    t ^= s ^ (s >> 26);	// c
+    state->b = t;
+    return t + s;
+}
+
+rand_state create_rand_state(void)
+{
+    struct xorshift128p_state state;
+    state.a = 0xF4F9F632A33FD8CF;
+    state.b = 0x59A42E9F51B09B89;
+    return state;
+}
+
+static f32 rand_f32(rand_state* state)
+{
+    u32 r = xorshift128p(state);
+    return r / (f32)UINT32_MAX;
+}
+
+static f32 rand_f32_range(rand_state* state, f32 min, f32 max)
+{
+    const f32 range = max - min;
+    return (rand_f32(state) * range) + min;
+}
+
+static Vec3 rand_vec3_in_unit_sphere(rand_state* state)
+{
+    Vec3 p;
+    while (true)
+    {
+        p.x = rand_f32_range(state, -1.0, 1.0);
+        p.y = rand_f32_range(state, -1.0, 1.0);
+        p.z = rand_f32_range(state, -1.0, 1.0);
+        if (length_squared_vec3(p) < 1.0) { break; }
+    }
+    return p;
+}
+
+static Vec3 rand_vec3_in_unit_disc(rand_state* state)
+{
+    Vec3 p;
+    while (true)
+    {
+        p.x = rand_f32_range(state, -1.0, 1.0);
+        p.y = rand_f32_range(state, -1.0, 1.0);
+        p.z = 0;
+        if (length_squared_vec3(p) < 1.0) { break; }
+    }
+    return p;
+}
+
+//------------------------------------------------------------------------------
 // Ray
 //------------------------------------------------------------------------------
 typedef struct {
@@ -237,17 +303,17 @@ Camera create_camera(
 //------------------------------------------------------------------------------
 // Path tracing
 //------------------------------------------------------------------------------
-Ray generate_ray(const Camera camera, const i32 x, const i32 y)
+Ray generate_ray(const Camera camera, const i32 x, const i32 y, rand_state* rand_state)
 {
     // Random starting position on lens aperture
-    const Vec3 rd = { 1.0f, 1.0f, 1.0f }; // scale_vec3(rand.randomPointFromUnitDisc(), cam.lens_radius);
+    const Vec3 rd = scale_vec3(rand_vec3_in_unit_disc(rand_state), camera.lens_radius);
     const Vec3 aperture_offset_u = scale_vec3(camera.u, rd.x);
     const Vec3 aperture_offset_v = scale_vec3(camera.v, rd.y);
     const Vec3 aperture_offset = add_vec3(aperture_offset_u, aperture_offset_v);
 
     // The point that corresponds to on the frustum plane
-    const Vec3 horiz = scale_vec3(camera.u, (x /*+ rand.float()*/) * camera.px_scale.x);
-    const Vec3 vert  = scale_vec3(camera.v, (y /*+ rand.float()*/) * camera.px_scale.y);
+    const Vec3 horiz = scale_vec3(camera.u, (x + rand_f32(rand_state)) * camera.px_scale.x);
+    const Vec3 vert  = scale_vec3(camera.v, (y + rand_f32(rand_state)) * camera.px_scale.y);
     Vec3 to_pixel = add_vec3(camera.top_left, horiz);
     to_pixel = subtract_vec3(to_pixel, vert);
 
@@ -260,7 +326,7 @@ Ray generate_ray(const Camera camera, const i32 x, const i32 y)
 }
 
 //------------------------------------------------------------------------------
-Vec3 calc_color(const Ray ray, const Scene* scene)
+Vec3 calc_color(const Ray ray, const Scene* scene, rand_state* rand_state)
 {
     // Draw background sky gradient
     const Vec3 unit_direction = normalize_vec3(ray.direction);
@@ -278,6 +344,9 @@ int main()
     const f32 num_samples_recip = 1.0f / NUM_SAMPLES;
     i32 ret;
     PxColor pixels[IMAGE_HEIGHT][IMAGE_WIDTH];
+
+    // Random
+    struct xorshift128p_state rand_state = create_rand_state();
 
     // Scene
     Scene scene;
@@ -317,8 +386,8 @@ int main()
             Vec3 accumulated_color = { .x = 0.0f, .y = 0.0f, .z = 0.0f };
             for (i32 sample = 0; sample < NUM_SAMPLES; ++sample)
             {
-                const Ray ray        = generate_ray(camera, x, y);
-                const Vec3 ray_color = calc_color(ray, &scene);
+                const Ray ray        = generate_ray(camera, x, y, &rand_state);
+                const Vec3 ray_color = calc_color(ray, &scene, &rand_state);
                 accumulated_color    = add_vec3(accumulated_color, ray_color);
             } // sample
 
