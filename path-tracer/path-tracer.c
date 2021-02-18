@@ -289,7 +289,7 @@ int main()
     const f32 vertical_fov = 120.0f;
     const f32 aspect_ratio = (f32)IMAGE_WIDTH / IMAGE_HEIGHT;
     const f32 aperture     = 0.1f;
-    const f32 focus_dist   = 10.0f;
+    const f32 focus_dist   = 1.0f;  // TODO: Investigate: Changing this affects background gradient, because it effectively shrinks the vertical_fov. Is that expected from focus_dist?
 
     Camera camera = create_camera(
         camera_pos,
