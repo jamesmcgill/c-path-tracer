@@ -8,6 +8,7 @@
 
 #define _USE_MATH_DEFINES
 #include <math.h>    // M_PI, cos, sin
+#include <float.h>   // FLT_MAX
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb/stb_image_write.h"
@@ -27,7 +28,8 @@ typedef double   f64;
 // Output image details
 static const char* const IMAGE_FILENAME = "test.bmp";
 
-enum {
+enum
+{
     // Output image details
     IMAGE_WIDTH  = 1920/4,
     IMAGE_HEIGHT = 1080/4,
@@ -40,7 +42,8 @@ enum {
 };
 
 //------------------------------------------------------------------------------
-typedef struct {
+typedef struct
+{
     u8 red;
     u8 green;
     u8 blue;
@@ -59,13 +62,28 @@ f32 clampf(f32 val)
     return val;
 }
 
-typedef struct {
+bool approx_equal_f32(f32 a, f32 b)
+{
+    // https://randomascii.wordpress.com/2012/02/25/comparing-floating-point-numbers-2012-edition/
+    i32 A = (i32)a;
+    i32 B = (i32)b;
+    if (A < 0 != B < 0) { return false; }  // Different sign means they don't match
+
+    static const i32 max_ulps_diff = 0x2;
+
+    i32 ulps_diff = abs(A - B);
+    return (ulps_diff <= max_ulps_diff);
+}
+
+typedef struct
+{
     f32 x;
     f32 y;
     f32 z;
 } Vec3;
 
-typedef struct {
+typedef struct
+{
     f32 x;
     f32 y;
 } Vec2;
@@ -164,8 +182,9 @@ Vec3 clamp_vec3(const Vec3 v)
 //------------------------------------------------------------------------------
 // Random
 //------------------------------------------------------------------------------
-typedef struct xorshift128p_state {
-  uint64_t a, b;
+typedef struct xorshift128p_state
+{
+    uint64_t a, b;
 } rand_state;
 
 /* The state must be seeded so that it is not all zero */
@@ -191,7 +210,7 @@ rand_state create_rand_state(void)
 
 f32 rand_f32(rand_state* state)
 {
-    u32 r = xorshift128p(state);
+    u32 r = (u32)xorshift128p(state);
     return r / (f32)UINT32_MAX;
 }
 
@@ -206,10 +225,10 @@ Vec3 rand_vec3_in_unit_sphere(rand_state* state)
     Vec3 p;
     while (true)
     {
-        p.x = rand_f32_range(state, -1.0, 1.0);
-        p.y = rand_f32_range(state, -1.0, 1.0);
-        p.z = rand_f32_range(state, -1.0, 1.0);
-        if (length_squared_vec3(p) < 1.0) { break; }
+        p.x = rand_f32_range(state, -1.0f, 1.0f);
+        p.y = rand_f32_range(state, -1.0f, 1.0f);
+        p.z = rand_f32_range(state, -1.0f, 1.0f);
+        if (length_squared_vec3(p) < 1.0f) { break; }
     }
     return p;
 }
@@ -219,18 +238,56 @@ Vec3 rand_vec3_in_unit_disc(rand_state* state)
     Vec3 p;
     while (true)
     {
-        p.x = rand_f32_range(state, -1.0, 1.0);
-        p.y = rand_f32_range(state, -1.0, 1.0);
+        p.x = rand_f32_range(state, -1.0f, 1.0f);
+        p.y = rand_f32_range(state, -1.0f, 1.0f);
         p.z = 0;
-        if (length_squared_vec3(p) < 1.0) { break; }
+        if (length_squared_vec3(p) < 1.0f) { break; }
     }
     return p;
 }
 
 //------------------------------------------------------------------------------
+Vec3 reflect_vec3(Vec3 v, Vec3 surface_normal)
+{
+    const f32 double_height = dot_vec3(v, surface_normal) * -2.0f;
+    Vec3 reflect_height = scale_vec3(surface_normal, double_height);
+    return add_vec3(v, reflect_height);
+}
+
+//------------------------------------------------------------------------------
+Vec3 refract_theta_vec3(
+    Vec3 v,
+    f32 in_cos_theta,
+    Vec3 surface_normal,
+    f32 ni_over_nt)
+{
+    assert(approx_equal_f32(1.0f, length_squared_vec3(v)) && "v must be normalized");
+
+    const Vec3 in_ortho_len = scale_vec3(surface_normal, in_cos_theta);
+    Vec3 ortho = add_vec3(v, in_ortho_len);
+    ortho = scale_vec3(ortho, ni_over_nt);
+
+    const f32 parallel_len = -sqrtf( fabsf(1.0f - length_squared_vec3(ortho)) );
+    const Vec3 parallel = scale_vec3(surface_normal, parallel_len);
+
+    return add_vec3(ortho, parallel);
+}
+
+//------------------------------------------------------------------------------
+Vec3 refract_vec3(Vec3 v, Vec3 surface_normal, f32 ni_over_nt)
+{
+    const Vec3 unit_v = normalize_vec3(v);
+    const Vec3 inv_v = scale_vec3(unit_v, -1.0f);
+    const f32 cos_theta = min(dot_vec3(inv_v, surface_normal),  1.0f);
+
+    return refract_theta_vec3(unit_v, cos_theta, surface_normal, ni_over_nt);
+}
+
+//------------------------------------------------------------------------------
 // Ray
 //------------------------------------------------------------------------------
-typedef struct {
+typedef struct
+{
     Vec3 origin;
     Vec3 direction;
 } Ray;
@@ -241,11 +298,34 @@ Vec3 ray_at_t(const Ray ray, const f32 t)
 }
 
 //------------------------------------------------------------------------------
+// Materials
+//------------------------------------------------------------------------------
+enum MaterialType
+{
+    MATERIAL_LAMBERTIAN,
+    MATERIAL_METAL,
+    MATERIAL_DIELECTRIC
+};
+
+typedef struct
+{
+    enum MaterialType type;
+    union
+    {
+        struct { Vec3 diff_albedo; };             // Lambertian
+        struct { Vec3 metal_albedo; f32 fuzz; };  // Metal
+        struct { f32 refract_index; };            // Dielectric
+    };
+} Material;
+
+//------------------------------------------------------------------------------
+// Collision
+//------------------------------------------------------------------------------
 typedef struct
 {
     Vec3 point;
     Vec3 surface_normal;
-//  Material* material_ptr;
+    Material material;
     f32 t;
     bool front_face;
 } HitInfo;
@@ -256,10 +336,108 @@ typedef struct
     Vec3 attenuation;
 } ScatterInfo;
 
+
+//------------------------------------------------------------------------------
+bool scatter_lambertian(
+    ScatterInfo* scatter_info,
+    const Ray ray,
+    const HitInfo hit_info,
+    rand_state* rand_state)
+{
+    assert(hit_info.material.type == MATERIAL_LAMBERTIAN);
+
+    const Vec3 normal_sphere_pos =
+        add_vec3(hit_info.point, hit_info.surface_normal);
+    const Vec3 reflect_point =
+        add_vec3(normal_sphere_pos, rand_vec3_in_unit_sphere(rand_state));
+
+    scatter_info->ray = (Ray)
+    {
+        .origin = hit_info.point,
+        .direction = subtract_vec3(reflect_point, hit_info.point),
+    };
+    scatter_info->attenuation = hit_info.material.diff_albedo;
+
+    return true;
+}
+//------------------------------------------------------------------------------
+bool scatter_metal(
+    ScatterInfo* scatter_info,
+    const Ray ray,
+    const HitInfo hit_info,
+    rand_state* rand_state)
+{
+    assert(hit_info.material.type == MATERIAL_METAL);
+
+    const Vec3 reflected_dir = reflect_vec3(ray.direction, hit_info.surface_normal);
+    const Vec3 fuzz_offset =
+        scale_vec3(rand_vec3_in_unit_sphere(rand_state), hit_info.material.fuzz);
+    const Vec3 scattered_dir = add_vec3(reflected_dir, fuzz_offset);
+    if (dot_vec3(scattered_dir, hit_info.surface_normal) > 0.0f)
+    {
+        scatter_info->ray = (Ray)
+        {
+            .origin = hit_info.point,
+            .direction = scattered_dir,
+        };
+        scatter_info->attenuation = hit_info.material.metal_albedo;
+        return true;
+    }
+
+    return false;
+}
+
+//------------------------------------------------------------------------------
+f32 schlick(const f32 cos_theta, const f32 refract_index)
+{
+    const f32 r = (1.0f - refract_index) / (1.0f + refract_index);
+    const f32 r0 = r * r;
+    return r0 + (1.0f - r0) * powf((1.0f - cos_theta), 5.0f);
+}
+
+bool scatter_dielectric(
+    ScatterInfo* scatter_info,
+    const Ray ray,
+    const HitInfo hit_info,
+    rand_state* rand_state)
+{
+    assert(hit_info.material.type == MATERIAL_DIELECTRIC);
+
+    // Adjust properties depending on whether ray is entering or exiting surface
+    const f32 ni_over_nt = (hit_info.front_face)
+        ? 1.0f / hit_info.material.refract_index
+        : hit_info.material.refract_index;
+
+    const Vec3 surface_normal = (hit_info.front_face)
+        ? hit_info.surface_normal
+        : scale_vec3(hit_info.surface_normal, -1.0f);
+
+    // Obtain sin theta to check for total internal reflection
+    const Vec3 unit_v = normalize_vec3(ray.direction);
+    const f32 cos_theta = min( dot_vec3(scale_vec3(unit_v, -1.0f), surface_normal), 1.0f);
+    const f32 sin_theta = sqrtf(1.0f - (cos_theta * cos_theta));
+
+    const bool will_reflect = ( (ni_over_nt * sin_theta > 1.0f)
+        || (schlick(cos_theta, ni_over_nt) > rand_f32(rand_state)) );
+
+    const Vec3 scattered_dir = (will_reflect)
+        ? reflect_vec3(unit_v, surface_normal)
+        : refract_theta_vec3(unit_v, cos_theta, surface_normal, ni_over_nt);
+
+    scatter_info->ray = (Ray)
+    {
+        .origin = hit_info.point,
+        .direction = scattered_dir,
+    };
+    scatter_info->attenuation = (Vec3){.x = 1.0f, .y = 1.0f, .z = 1.0f};
+    return true;
+}
+
 //------------------------------------------------------------------------------
 // Scene 
 //------------------------------------------------------------------------------
-typedef struct {
+typedef struct
+{
     Vec3 position;
 } Scene;
 
@@ -268,10 +446,10 @@ typedef struct
 {
     Vec3 position;
     f32 radius;
-//  Material material;
+    Material material;
 } Sphere;
 
-//----------------------------------------------------------------------------
+//------------------------------------------------------------------------------
 bool is_in_range(const f32 val, const f32 min, const f32 max)
 {
     if (val < min) { return false; }
@@ -279,7 +457,7 @@ bool is_in_range(const f32 val, const f32 min, const f32 max)
     return true;
 }
 
-//----------------------------------------------------------------------------
+//------------------------------------------------------------------------------
 bool select_closest_t(f32* closest_t, f32 t1, f32 t2, f32 t_min, f32 t_max)
 {
     const bool is_t1_valid = is_in_range(t1, t_min, t_max);
@@ -324,7 +502,7 @@ bool hit_test(
     const f32 c      = length_squared_vec3(displacement) - radius_sq;
 
     const f32 discriminant = (half_b * half_b) - (a * c);
-    if (discriminant < 0.0) { return false; }
+    if (discriminant < 0.0f) { return false; }
 
     const f32 discrim_root = sqrtf(discriminant);
     const f32 t1 = (-half_b - discrim_root) / a;
@@ -340,18 +518,19 @@ bool hit_test(
         hit_info->point = point_at_t;
         hit_info->t = t;
         hit_info->surface_normal = outward_normal;
-        hit_info->front_face = dot_vec3(outward_normal, ray.direction) < 0.0;
-        //hit_info->material_ptr = &self.material;
+        hit_info->front_face = dot_vec3(outward_normal, ray.direction) < 0.0f;
+        hit_info->material = sphere.material;
         return true;
     }
     return false;
 }
 
 
-//----------------------------------------------------------------------------
+//------------------------------------------------------------------------------
 // Camera
-//----------------------------------------------------------------------------
-typedef struct {
+//------------------------------------------------------------------------------
+typedef struct
+{
     Vec3 position;
     Vec3 top_left;
     Vec3 u;
@@ -435,7 +614,8 @@ Ray generate_ray(const Camera camera, const i32 x, const i32 y, rand_state* rand
 
     const Vec3 ray_start = add_vec3(camera.position, aperture_offset);
     const Vec3 ray_dir = subtract_vec3(to_pixel, ray_start);
-    return (Ray) {
+    return (Ray)
+    {
         .origin = ray_start,
         .direction = ray_dir
     };
@@ -450,28 +630,58 @@ Vec3 calc_color(
 {
     if (call_depth > 50)
     {
-        return (Vec3) {.x = 0.0, .y = 0.0, .z = 0.0};
+        return (Vec3) {.x = 1.0f, .y = 0.0f, .z = 0.0f};
     }
 
     // TODO: real scene data
-    i32 num_spheres = 1;
-    Sphere spheres[1] =
+    i32 num_spheres = 3;
+    Sphere spheres[3] =
     {
-        (Sphere){.position = { 0.0f, 0.0f, 0.0f }, .radius = 10.0f }
+        (Sphere)
+        {
+            .position = { 0.0f, 0.0f, -1.0f },
+            .radius = 0.5f,
+            .material = (Material)
+            {
+                .type = MATERIAL_LAMBERTIAN,
+                .diff_albedo = (Vec3){ 0.1f, 0.2f, 0.5f },
+            }
+        },
+        (Sphere)
+        {
+            .position = { 1.0f, 0.0f, -1.0f },
+            .radius = 0.5f,
+            .material = (Material)
+            {
+                .type = MATERIAL_METAL,
+                .metal_albedo = (Vec3){ 0.8f, 0.6f, 0.2f },
+                .fuzz = 0.0f,
+            }
+        },
+        (Sphere)
+        {
+            .position = { -1.0f, 0.0f, -1.0f },
+            .radius = 0.5f,
+            .material = (Material)
+            {
+                .type = MATERIAL_DIELECTRIC,
+                .refract_index = 1.5f,
+            }
+        }
     };
 
     // Test all objects in the scene
     bool hit_something = false;
-    f32 closest_t = 99999.0f;   // TODO: math.f32_max;
+    f32 closest_t = FLT_MAX;
     HitInfo hit_info;
     for (i32 i = 0; i < num_spheres; ++i)
     {
         HitInfo current_info;
-        if (hit_test(&current_info, spheres[i], ray, 0.001, closest_t))
+        if (hit_test(&current_info, spheres[i], ray, 0.001f, closest_t))
         {
             hit_something = true;
             closest_t = current_info.t;
-            hit_info = current_info;  // TODO: do I really need to deep copy?
+            hit_info = current_info;
         }
     }
 
@@ -479,51 +689,35 @@ Vec3 calc_color(
     {
         bool is_scattered = false;
         ScatterInfo scatter_info;
-
-        // TODO: this is temp code. similar to lambertian
-        const Vec3 normal_sphere_pos =
-            add_vec3(hit_info.point, hit_info.surface_normal);
-        const Vec3 reflect_point =
-            add_vec3(normal_sphere_pos, rand_vec3_in_unit_sphere(rand_state));
-
-        scatter_info.ray = (Ray)
+        switch (hit_info.material.type)
         {
-            .origin = hit_info.point,
-            .direction = subtract_vec3(reflect_point, hit_info.point),
-        },
-        scatter_info.attenuation = (Vec3) { 0.1f, 0.2f, 0.2f },
-        is_scattered = true;
-
-/*
-        switch (hit_info.material_type)
-        {
-        case MaterialTag.Lambertian:
-            is_scattered = labertian_scatter(
-                &scatter_info, ray, &hit_info, rand_state);
+        case MATERIAL_LAMBERTIAN:
+            is_scattered = scatter_lambertian(
+                &scatter_info, ray, hit_info, rand_state);
             break;
-        case MaterialTag.Metal:
-            is_scattered = metal_scatter(
-                &scatter_info, ray, &hit_info, rand_state);
+        case MATERIAL_METAL:
+            is_scattered = scatter_metal(
+                &scatter_info, ray, hit_info, rand_state);
             break;
-        case MaterialTag.Dielectric:
-            is_scattered = dielectric_scatter(
-                &scatter_info, ray, &hit_info, rand_state);
+        case MATERIAL_DIELECTRIC:
+            is_scattered = scatter_dielectric(
+                &scatter_info, ray, hit_info, rand_state);
             break;
         };
-*/
+
         if (is_scattered)
         {
             Vec3 color = calc_color(
                 scatter_info.ray,
                 scene,
-                rand,
+                rand_state,
                 call_depth + 1
             );
             return multiply_vec3(color, scatter_info.attenuation);
         }
         else
         {
-            return (Vec3){.x = 0.0, .y = 0.0, .z = 0.0};
+            return (Vec3){.x = 0.0f, .y = 0.0f, .z = 0.0f};
         }
     } // hit_something
 
@@ -538,7 +732,7 @@ Vec3 calc_color(
 }
 
 //------------------------------------------------------------------------------
-int main()
+int main(void)
 {
     const f32 num_samples_recip = 1.0f / NUM_SAMPLES;
     i32 ret;
@@ -557,7 +751,7 @@ int main()
     const f32 vertical_fov = 120.0f;
     const f32 aspect_ratio = (f32)IMAGE_WIDTH / IMAGE_HEIGHT;
     const f32 aperture     = 0.1f;
-    const f32 focus_dist   = 1.0f;  // TODO: Investigate: Changing this affects background gradient, because it effectively shrinks the vertical_fov. Is that expected from focus_dist?
+    const f32 focus_dist   = 10.0f;  // TODO: Investigate: Changing this affects background gradient, because it effectively shrinks the vertical_fov. Is that expected from focus_dist?
 
     Camera camera = create_camera(
         camera_pos,
