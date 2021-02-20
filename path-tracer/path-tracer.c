@@ -31,8 +31,8 @@ static const char* const IMAGE_FILENAME = "test.bmp";
 enum
 {
     // Output image details
-    IMAGE_WIDTH  = 1920/4,
-    IMAGE_HEIGHT = 1080/4,
+    IMAGE_WIDTH  = 1920,
+    IMAGE_HEIGHT = 1080,
 
     // Rendering parameters
     NUM_SAMPLES = 50,
@@ -234,9 +234,9 @@ Vec3 rand_vec3_in_range(rand_state* state, f32 min, f32 max)
 {
     return (Vec3)
     {
-        .x = rand_f32(state, min, max),
-        .y = rand_f32(state, min, max),
-        .z = rand_f32(state, min, max),
+        .x = rand_f32_range(state, min, max),
+        .y = rand_f32_range(state, min, max),
+        .z = rand_f32_range(state, min, max),
     };
 }
 
@@ -451,7 +451,7 @@ void create_random_scene(Scene* scene, rand_state* rand_state)
     const f32 small_radius = 0.2f;
 
     // TODO: Why is this position avoided?
-    const Vec3 avoid_pos = { .x = 4.0, .y = 0.2, .z = 0.0 };
+    const Vec3 avoid_pos = { .x = 4.0f, .y = 0.2f, .z = 0.0f };
 
     for (int u = 0; u < GRID_SIZE; ++u)
     {
@@ -889,7 +889,7 @@ int main(void)
 {
     const f32 num_samples_recip = 1.0f / NUM_SAMPLES;
     i32 ret;
-    PxColor pixels[IMAGE_HEIGHT][IMAGE_WIDTH];
+    PxColor* pixels = malloc(sizeof(PxColor[IMAGE_WIDTH * IMAGE_HEIGHT]));
 
     // Random
     struct xorshift128p_state rand_state = create_rand_state();
@@ -940,7 +940,7 @@ int main(void)
 
             Vec3 color = scale_vec3(accumulated_color, num_samples_recip); // Average of samples
             color = sqrt_vec3(color);                                      // Gamma correction
-            pixels[y][x] = (PxColor)
+            pixels[y * IMAGE_WIDTH + x] = (PxColor)
             {
                 .red   = (u8)(color.x * UINT8_MAX),
                 .green = (u8)(color.y * UINT8_MAX),
@@ -956,8 +956,9 @@ int main(void)
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
         NUM_COLOR_COMPONENTS,
-        &pixels
+        pixels
     );
+    free(pixels);
 
     if (ret == 0)
     {
