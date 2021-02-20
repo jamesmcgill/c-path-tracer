@@ -220,6 +220,27 @@ f32 rand_f32_range(rand_state* state, f32 min, f32 max)
     return (rand_f32(state) * range) + min;
 }
 
+Vec3 rand_vec3(rand_state* state)
+{
+    return (Vec3)
+    {
+        .x = rand_f32(state),
+        .y = rand_f32(state),
+        .z = rand_f32(state),
+    };
+}
+
+Vec3 rand_vec3_in_range(rand_state* state, f32 min, f32 max)
+{
+    return (Vec3)
+    {
+        .x = rand_f32(state, min, max),
+        .y = rand_f32(state, min, max),
+        .z = rand_f32(state, min, max),
+    };
+}
+
+
 Vec3 rand_vec3_in_unit_sphere(rand_state* state)
 {
     Vec3 p;
@@ -317,6 +338,192 @@ typedef struct
         struct { f32 refract_index; };            // Dielectric
     };
 } Material;
+
+//------------------------------------------------------------------------------
+// Scene
+//------------------------------------------------------------------------------
+typedef struct
+{
+    Vec3 position;
+    f32 radius;
+    Material material;
+} Sphere;
+
+enum
+{
+    GRID_SIZE = 22,
+    NUM_SPHERES = 4 + (GRID_SIZE * GRID_SIZE)
+};
+typedef struct
+{
+    Sphere spheres[NUM_SPHERES];
+} Scene;
+
+//------------------------------------------------------------------------------
+Scene create_basic_scene(void)
+{
+    assert(NUM_SPHERES == 5);
+
+    return (Scene)
+    {
+        .spheres =
+        {
+            (Sphere)
+            {
+                .position = { 0.0f, -100.5f, -1.0f },
+                .radius = 100.0f,
+                .material = (Material)
+                {
+                    .type = MATERIAL_LAMBERTIAN,
+                    .diff_albedo = (Vec3){ 0.8f, 0.8f, 0.0f },
+                }
+            },
+            (Sphere)
+            {
+                .position = { 0.0f, 0.0f, -1.0f },
+                .radius = 0.5f,
+                .material = (Material)
+                {
+                    .type = MATERIAL_LAMBERTIAN,
+                    .diff_albedo = (Vec3){ 0.1f, 0.2f, 0.5f },
+                }
+            },
+            (Sphere)
+            {
+                .position = { 1.0f, 0.0f, -1.0f },
+                .radius = 0.5f,
+                .material = (Material)
+                {
+                    .type = MATERIAL_METAL,
+                    .metal_albedo = (Vec3){ 0.8f, 0.6f, 0.2f },
+                    .fuzz = 0.0f,
+                }
+            },
+            (Sphere)
+            {
+                 .position = { -1.0f, 0.0f, -1.0f },
+                 .radius = 0.5f,
+                 .material = (Material)
+                 {
+                     .type = MATERIAL_DIELECTRIC,
+                     .refract_index = 1.5f,
+                 }
+            },
+            (Sphere)
+            {
+                .position = { -1.0f, 0.0f, -1.0f },
+                .radius = -0.45f,
+                .material = (Material)
+                {
+                    .type = MATERIAL_DIELECTRIC,
+                    .refract_index = 1.5f,
+                }
+            }
+        }
+    };
+}
+//------------------------------------------------------------------------------
+void create_random_scene(Scene* scene, rand_state* rand_state)
+{
+    const Material ground_material = (Material)
+    {
+        .type = MATERIAL_LAMBERTIAN,
+        .diff_albedo = { .x = 0.5f, .y = 0.5f, .z = 0.5f },
+    };
+    const Material glass_material = (Material)
+    {
+        .type = MATERIAL_DIELECTRIC,
+        .refract_index = 1.5f,
+    };
+    const Material metal_material = (Material)
+    {
+        .type = MATERIAL_METAL,
+        .metal_albedo = { .x = 0.7f, .y = 0.6f, .z = 0.5f },
+        .fuzz = 0.0f,
+    };
+    const Material diffuse_material = (Material)
+    {
+        .type = MATERIAL_LAMBERTIAN,
+        .diff_albedo = { .x = 0.4f, .y = 0.2f, .z = 0.1f },
+    };
+
+    const f32 large_radius = 1.0f;
+    const f32 small_radius = 0.2f;
+
+    // TODO: Why is this position avoided?
+    const Vec3 avoid_pos = { .x = 4.0, .y = 0.2, .z = 0.0 };
+
+    for (int u = 0; u < GRID_SIZE; ++u)
+    {
+        for (int v = 0; v < GRID_SIZE; ++v)
+        {
+            Vec3 position;
+            do
+            {
+                position = (Vec3)
+                {
+                    .x = (f32)u - (GRID_SIZE / 2) + rand_f32_range(rand_state, 0.0, 0.9f),
+                    .y = small_radius,
+                    .z = (f32)v - (GRID_SIZE / 2) + rand_f32_range(rand_state, 0.0, 0.9f),
+                };
+            } while (length_squared_vec3(subtract_vec3(position, avoid_pos)) <= 0.9f);
+
+            // Materials
+            Material material;
+            const f32 material_choice = rand_f32(rand_state);
+            if (material_choice < 0.8f)
+            {
+                material.type = MATERIAL_LAMBERTIAN;
+                material.diff_albedo = multiply_vec3(
+                    rand_vec3(rand_state), rand_vec3(rand_state));
+            }
+            else if (material_choice < 0.95f)
+            {
+                material.type = MATERIAL_METAL;
+                material.metal_albedo =
+                    rand_vec3_in_range(rand_state, 0.5f, 1.0f);
+                material.fuzz = rand_f32_range(rand_state, 0.0f, 0.5f);
+            }
+            else
+            {
+                material = glass_material;
+            }
+
+            scene->spheres[u * GRID_SIZE + v] = (Sphere)
+            {
+                .position = position,
+                .radius = small_radius,
+                .material = material,
+            };
+        } // for v
+    } // for u
+
+    // Large Spheres
+    scene->spheres[GRID_SIZE * GRID_SIZE + 0] = (Sphere)
+    {
+        .position = { .x = 0.0f, .y = -1000.0f, .z = 0.0f },
+        .radius = 1000.0,
+        .material = ground_material,
+    };
+    scene->spheres[GRID_SIZE * GRID_SIZE + 1] = (Sphere)
+    {
+        .position = { .x = 4.0f, .y = 1.0f, .z = 0.0f },
+        .radius = large_radius,
+        .material = metal_material,
+    };
+    scene->spheres[GRID_SIZE * GRID_SIZE + 2] = (Sphere)
+    {
+        .position = { .x = 0.0f, .y = 1.0f, .z = 0.0f },
+        .radius = large_radius,
+        .material = glass_material,
+    };
+    scene->spheres[GRID_SIZE * GRID_SIZE + 3] = (Sphere)
+    {
+        .position = {.x = -4.0, .y = 1.0, .z = 0.0 },
+        .radius = large_radius,
+        .material = diffuse_material,
+    };
+}
 
 //------------------------------------------------------------------------------
 // Collision
@@ -434,22 +641,6 @@ bool scatter_dielectric(
 }
 
 //------------------------------------------------------------------------------
-// Scene 
-//------------------------------------------------------------------------------
-typedef struct
-{
-    Vec3 position;
-} Scene;
-
-//------------------------------------------------------------------------------
-typedef struct
-{
-    Vec3 position;
-    f32 radius;
-    Material material;
-} Sphere;
-
-//------------------------------------------------------------------------------
 bool is_in_range(const f32 val, const f32 min, const f32 max)
 {
     if (val < min) { return false; }
@@ -524,7 +715,6 @@ bool hit_test(
     }
     return false;
 }
-
 
 //------------------------------------------------------------------------------
 // Camera
@@ -633,51 +823,14 @@ Vec3 calc_color(
         return (Vec3) {.x = 1.0f, .y = 0.0f, .z = 0.0f};
     }
 
-    // TODO: real scene data
-    i32 num_spheres = 3;
-    Sphere spheres[3] =
-    {
-        (Sphere)
-        {
-            .position = { 0.0f, 0.0f, -1.0f },
-            .radius = 0.5f,
-            .material = (Material)
-            {
-                .type = MATERIAL_LAMBERTIAN,
-                .diff_albedo = (Vec3){ 0.1f, 0.2f, 0.5f },
-            }
-        },
-        (Sphere)
-        {
-            .position = { 1.0f, 0.0f, -1.0f },
-            .radius = 0.5f,
-            .material = (Material)
-            {
-                .type = MATERIAL_METAL,
-                .metal_albedo = (Vec3){ 0.8f, 0.6f, 0.2f },
-                .fuzz = 0.0f,
-            }
-        },
-        (Sphere)
-        {
-            .position = { -1.0f, 0.0f, -1.0f },
-            .radius = 0.5f,
-            .material = (Material)
-            {
-                .type = MATERIAL_DIELECTRIC,
-                .refract_index = 1.5f,
-            }
-        }
-    };
-
     // Test all objects in the scene
     bool hit_something = false;
     f32 closest_t = FLT_MAX;
     HitInfo hit_info;
-    for (i32 i = 0; i < num_spheres; ++i)
+    for (i32 i = 0; i < NUM_SPHERES; ++i)
     {
         HitInfo current_info;
-        if (hit_test(&current_info, spheres[i], ray, 0.001f, closest_t))
+        if (hit_test(&current_info, scene->spheres[i], ray, 0.001f, closest_t))
         {
             hit_something = true;
             closest_t = current_info.t;
@@ -743,6 +896,7 @@ int main(void)
 
     // Scene
     Scene scene;
+    create_random_scene(&scene, &rand_state);
 
     // Camera
     const Vec3 camera_pos  = { .x = 13.0f, .y = 2.0f, .z = 3.0f };
