@@ -4,6 +4,8 @@
 cmake_minimum_required (VERSION 3.8)
 
 # Add source to this project's executable.
-add_executable (path-tracer "path-tracer.c" )
+add_executable (path-tracer "path-tracer.c"  "win32-threading.h" "c11-threading.h")
 
-# TODO: Add tests and install targets if needed.
+if (NOT MSVC)
+    target_link_libraries(path-tracer m pthread)
+endif()

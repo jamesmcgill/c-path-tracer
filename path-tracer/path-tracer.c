@@ -24,36 +24,53 @@ typedef uint64_t u64;
 typedef float    f32;
 typedef double   f64;
 
+
+#ifdef _WIN32
+#include "win32-threading.h"
+#else
+#include "c11-threading.h"
+#endif
+
 //------------------------------------------------------------------------------
 // Output image details
 static const char* const IMAGE_FILENAME = "test.bmp";
 
 enum
 {
+    NUM_THREADS = 32,
+
     // Output image details
     IMAGE_WIDTH  = 1920,
     IMAGE_HEIGHT = 1080,
 
     // Rendering parameters
-    NUM_SAMPLES = 50,
+    NUM_SAMPLES = 200 / 20,
+    TILE_WIDTH = 64,        // Multiples of 64 (64 is the assumed cache length)
 
     // Program constants
     NUM_COLOR_COMPONENTS = 4,
 };
 
+static const f32 NUM_SAMPLES_RECIP = 1.0f / NUM_SAMPLES;
 //------------------------------------------------------------------------------
-typedef struct
+typedef struct PxColor PxColor;
+struct PxColor
 {
     u8 red;
     u8 green;
     u8 blue;
     u8 alpha;
-} PxColor;
+};
 
 //------------------------------------------------------------------------------
 // Math
 //------------------------------------------------------------------------------
 static const f32 degrees_to_radians = (f32)(M_PI) / 180.0f;
+
+i32 imin(const i32 a, const i32 b)
+{
+    return (a < b) ? a : b;
+}
 
 f32 clampf(f32 val)
 {
@@ -75,18 +92,20 @@ bool approx_equal_f32(f32 a, f32 b)
     return (ulps_diff <= max_ulps_diff);
 }
 
-typedef struct
+typedef struct Vec3 Vec3;
+struct Vec3
 {
     f32 x;
     f32 y;
     f32 z;
-} Vec3;
+};
 
-typedef struct
+typedef struct Vec2 Vec2;
+struct Vec2
 {
     f32 x;
     f32 y;
-} Vec2;
+};
 
 Vec3 add_vec3(const Vec3 lhs, const Vec3 rhs)
 {
@@ -180,94 +199,6 @@ Vec3 clamp_vec3(const Vec3 v)
 }
 
 //------------------------------------------------------------------------------
-// Random
-//------------------------------------------------------------------------------
-typedef struct xorshift128p_state
-{
-    uint64_t a, b;
-} rand_state;
-
-/* The state must be seeded so that it is not all zero */
-uint64_t xorshift128p(rand_state* state)
-{
-    uint64_t t = state->a;
-    uint64_t const s = state->b;
-    state->a = s;
-    t ^= t << 23;		// a
-    t ^= t >> 17;		// b
-    t ^= s ^ (s >> 26);	// c
-    state->b = t;
-    return t + s;
-}
-
-rand_state create_rand_state(void)
-{
-    struct xorshift128p_state state;
-    state.a = 0xF4F9F632A33FD8CF;
-    state.b = 0x59A42E9F51B09B89;
-    return state;
-}
-
-f32 rand_f32(rand_state* state)
-{
-    u32 r = (u32)xorshift128p(state);
-    return r / (f32)UINT32_MAX;
-}
-
-f32 rand_f32_range(rand_state* state, f32 min, f32 max)
-{
-    const f32 range = max - min;
-    return (rand_f32(state) * range) + min;
-}
-
-Vec3 rand_vec3(rand_state* state)
-{
-    return (Vec3)
-    {
-        .x = rand_f32(state),
-        .y = rand_f32(state),
-        .z = rand_f32(state),
-    };
-}
-
-Vec3 rand_vec3_in_range(rand_state* state, f32 min, f32 max)
-{
-    return (Vec3)
-    {
-        .x = rand_f32_range(state, min, max),
-        .y = rand_f32_range(state, min, max),
-        .z = rand_f32_range(state, min, max),
-    };
-}
-
-
-Vec3 rand_vec3_in_unit_sphere(rand_state* state)
-{
-    Vec3 p;
-    while (true)
-    {
-        p.x = rand_f32_range(state, -1.0f, 1.0f);
-        p.y = rand_f32_range(state, -1.0f, 1.0f);
-        p.z = rand_f32_range(state, -1.0f, 1.0f);
-        if (length_squared_vec3(p) < 1.0f) { break; }
-    }
-    return p;
-}
-
-Vec3 rand_vec3_in_unit_disc(rand_state* state)
-{
-    Vec3 p;
-    while (true)
-    {
-        p.x = rand_f32_range(state, -1.0f, 1.0f);
-        p.y = rand_f32_range(state, -1.0f, 1.0f);
-        p.z = 0;
-        if (length_squared_vec3(p) < 1.0f) { break; }
-    }
-    return p;
-}
-
-//------------------------------------------------------------------------------
 Vec3 reflect_vec3(Vec3 v, Vec3 surface_normal)
 {
     const f32 double_height = dot_vec3(v, surface_normal) * -2.0f;
@@ -299,19 +230,108 @@ Vec3 refract_vec3(Vec3 v, Vec3 surface_normal, f32 ni_over_nt)
 {
     const Vec3 unit_v = normalize_vec3(v);
     const Vec3 inv_v = scale_vec3(unit_v, -1.0f);
-    const f32 cos_theta = min(dot_vec3(inv_v, surface_normal),  1.0f);
+    const f32 cos_theta = fminf(dot_vec3(inv_v, surface_normal),  1.0f);
 
     return refract_theta_vec3(unit_v, cos_theta, surface_normal, ni_over_nt);
 }
 
 //------------------------------------------------------------------------------
+// Random
+//------------------------------------------------------------------------------
+typedef struct xorshift128p_state RandState;
+struct xorshift128p_state
+{
+    uint64_t a, b;
+};
+
+/* The state must be seeded so that it is not all zero */
+uint64_t xorshift128p(RandState* state)
+{
+    uint64_t t = state->a;
+    uint64_t const s = state->b;
+    state->a = s;
+    t ^= t << 23;		// a
+    t ^= t >> 17;		// b
+    t ^= s ^ (s >> 26);	// c
+    state->b = t;
+    return t + s;
+}
+
+RandState create_rand_state(void)
+{
+    struct xorshift128p_state state;
+    state.a = 0xF4F9F632A33FD8CF;
+    state.b = 0x59A42E9F51B09B89;
+    return state;
+}
+
+f32 rand_f32(RandState* state)
+{
+    u32 r = (u32)xorshift128p(state);
+    return r / (f32)UINT32_MAX;
+}
+
+f32 rand_f32_range(RandState* state, f32 min, f32 max)
+{
+    const f32 range = max - min;
+    return (rand_f32(state) * range) + min;
+}
+
+Vec3 rand_vec3(RandState* state)
+{
+    return (Vec3)
+    {
+        .x = rand_f32(state),
+        .y = rand_f32(state),
+        .z = rand_f32(state),
+    };
+}
+
+Vec3 rand_vec3_in_range(RandState* state, f32 min, f32 max)
+{
+    return (Vec3)
+    {
+        .x = rand_f32_range(state, min, max),
+        .y = rand_f32_range(state, min, max),
+        .z = rand_f32_range(state, min, max),
+    };
+}
+
+Vec3 rand_vec3_in_unit_sphere(RandState* state)
+{
+    Vec3 p;
+    while (true)
+    {
+        p.x = rand_f32_range(state, -1.0f, 1.0f);
+        p.y = rand_f32_range(state, -1.0f, 1.0f);
+        p.z = rand_f32_range(state, -1.0f, 1.0f);
+        if (length_squared_vec3(p) < 1.0f) { break; }
+    }
+    return p;
+}
+
+Vec3 rand_vec3_in_unit_disc(RandState* state)
+{
+    Vec3 p;
+    while (true)
+    {
+        p.x = rand_f32_range(state, -1.0f, 1.0f);
+        p.y = rand_f32_range(state, -1.0f, 1.0f);
+        p.z = 0;
+        if (length_squared_vec3(p) < 1.0f) { break; }
+    }
+    return p;
+}
+
+//------------------------------------------------------------------------------
 // Ray
 //------------------------------------------------------------------------------
-typedef struct
+typedef struct Ray Ray;
+struct Ray
 {
     Vec3 origin;
     Vec3 direction;
-} Ray;
+};
 
 Vec3 ray_at_t(const Ray ray, const f32 t)
 {
@@ -328,7 +348,8 @@ enum MaterialType
     MATERIAL_DIELECTRIC
 };
 
-typedef struct
+typedef struct Material Material;
+struct Material
 {
     enum MaterialType type;
     union
@@ -337,94 +358,101 @@ typedef struct
         struct { Vec3 metal_albedo; f32 fuzz; };  // Metal
         struct { f32 refract_index; };            // Dielectric
     };
-} Material;
+};
 
 //------------------------------------------------------------------------------
 // Scene
 //------------------------------------------------------------------------------
-typedef struct
+typedef struct Sphere Sphere;
+struct Sphere
 {
     Vec3 position;
     f32 radius;
     Material material;
-} Sphere;
+};
 
 enum
 {
     GRID_SIZE = 22,
     NUM_SPHERES = 4 + (GRID_SIZE * GRID_SIZE)
 };
-typedef struct
+
+typedef struct Scene Scene;
+struct Scene
 {
-    Sphere spheres[NUM_SPHERES];
-} Scene;
+    Sphere* spheres;
+};
 
 //------------------------------------------------------------------------------
 Scene create_basic_scene(void)
 {
     assert(NUM_SPHERES == 5);
 
-    return (Scene)
+    Scene scene;
+    scene.spheres = malloc(sizeof(Sphere[NUM_SPHERES]));
+
+    scene.spheres[0] = (Sphere)
     {
-        .spheres =
+        .position = { 0.0f, -100.5f, -1.0f },
+        .radius = 100.0f,
+        .material = (Material)
         {
-            (Sphere)
-            {
-                .position = { 0.0f, -100.5f, -1.0f },
-                .radius = 100.0f,
-                .material = (Material)
-                {
-                    .type = MATERIAL_LAMBERTIAN,
-                    .diff_albedo = (Vec3){ 0.8f, 0.8f, 0.0f },
-                }
-            },
-            (Sphere)
-            {
-                .position = { 0.0f, 0.0f, -1.0f },
-                .radius = 0.5f,
-                .material = (Material)
-                {
-                    .type = MATERIAL_LAMBERTIAN,
-                    .diff_albedo = (Vec3){ 0.1f, 0.2f, 0.5f },
-                }
-            },
-            (Sphere)
-            {
-                .position = { 1.0f, 0.0f, -1.0f },
-                .radius = 0.5f,
-                .material = (Material)
-                {
-                    .type = MATERIAL_METAL,
-                    .metal_albedo = (Vec3){ 0.8f, 0.6f, 0.2f },
-                    .fuzz = 0.0f,
-                }
-            },
-            (Sphere)
-            {
-                 .position = { -1.0f, 0.0f, -1.0f },
-                 .radius = 0.5f,
-                 .material = (Material)
-                 {
-                     .type = MATERIAL_DIELECTRIC,
-                     .refract_index = 1.5f,
-                 }
-            },
-            (Sphere)
-            {
-                .position = { -1.0f, 0.0f, -1.0f },
-                .radius = -0.45f,
-                .material = (Material)
-                {
-                    .type = MATERIAL_DIELECTRIC,
-                    .refract_index = 1.5f,
-                }
-            }
+            .type = MATERIAL_LAMBERTIAN,
+            .diff_albedo = (Vec3){ 0.8f, 0.8f, 0.0f },
         }
     };
+    scene.spheres[1] = (Sphere)
+    {
+        .position = { 0.0f, 0.0f, -1.0f },
+        .radius = 0.5f,
+        .material = (Material)
+        {
+            .type = MATERIAL_LAMBERTIAN,
+            .diff_albedo = (Vec3){ 0.1f, 0.2f, 0.5f },
+        }
+    };
+    scene.spheres[2] = (Sphere)
+    {
+        .position = { 1.0f, 0.0f, -1.0f },
+        .radius = 0.5f,
+        .material = (Material)
+        {
+            .type = MATERIAL_METAL,
+            .metal_albedo = (Vec3){ 0.8f, 0.6f, 0.2f },
+            .fuzz = 0.0f,
+        }
+    };
+    scene.spheres[3] = (Sphere)
+    {
+        .position = { -1.0f, 0.0f, -1.0f },
+        .radius = 0.5f,
+        .material = (Material)
+        {
+            .type = MATERIAL_DIELECTRIC,
+            .refract_index = 1.5f,
+        }
+    };
+    scene.spheres[4] = (Sphere)
+    {
+        .position = { -1.0f, 0.0f, -1.0f },
+        .radius = -0.45f,
+        .material = (Material)
+        {
+            .type = MATERIAL_DIELECTRIC,
+            .refract_index = 1.5f,
+        }
+    };
+
+    return scene;
 }
 //------------------------------------------------------------------------------
-void create_random_scene(Scene* scene, rand_state* rand_state)
+Scene create_random_scene(RandState* rand_state)
 {
+    assert(NUM_SPHERES == 4 + (GRID_SIZE * GRID_SIZE));
+
+    Scene scene;
+    scene.spheres = malloc(sizeof(Sphere[NUM_SPHERES]));
+
     const Material ground_material = (Material)
     {
         .type = MATERIAL_LAMBERTIAN,
@@ -489,7 +517,7 @@ void create_random_scene(Scene* scene, rand_state* rand_state)
                 material = glass_material;
             }
 
-            scene->spheres[u * GRID_SIZE + v] = (Sphere)
+            scene.spheres[u * GRID_SIZE + v] = (Sphere)
             {
                 .position = position,
                 .radius = small_radius,
@@ -499,49 +527,53 @@ void create_random_scene(Scene* scene, rand_state* rand_state)
     } // for u
 
     // Large Spheres
-    scene->spheres[GRID_SIZE * GRID_SIZE + 0] = (Sphere)
+    scene.spheres[GRID_SIZE * GRID_SIZE + 0] = (Sphere)
     {
         .position = { .x = 0.0f, .y = -1000.0f, .z = 0.0f },
         .radius = 1000.0,
         .material = ground_material,
     };
-    scene->spheres[GRID_SIZE * GRID_SIZE + 1] = (Sphere)
+    scene.spheres[GRID_SIZE * GRID_SIZE + 1] = (Sphere)
     {
         .position = { .x = 4.0f, .y = 1.0f, .z = 0.0f },
         .radius = large_radius,
         .material = metal_material,
     };
-    scene->spheres[GRID_SIZE * GRID_SIZE + 2] = (Sphere)
+    scene.spheres[GRID_SIZE * GRID_SIZE + 2] = (Sphere)
     {
         .position = { .x = 0.0f, .y = 1.0f, .z = 0.0f },
         .radius = large_radius,
         .material = glass_material,
     };
-    scene->spheres[GRID_SIZE * GRID_SIZE + 3] = (Sphere)
+    scene.spheres[GRID_SIZE * GRID_SIZE + 3] = (Sphere)
     {
         .position = {.x = -4.0, .y = 1.0, .z = 0.0 },
         .radius = large_radius,
         .material = diffuse_material,
     };
+
+    return scene;
 }
 
 //------------------------------------------------------------------------------
 // Collision
 //------------------------------------------------------------------------------
-typedef struct
+typedef struct HitInfo HitInfo;
+struct HitInfo
 {
     Vec3 point;
     Vec3 surface_normal;
     Material material;
     f32 t;
     bool front_face;
-} HitInfo;
+} ;
 
-typedef struct
+typedef struct ScatterInfo ScatterInfo;
+struct ScatterInfo
 {
     Ray ray;
     Vec3 attenuation;
-} ScatterInfo;
+};
 
 
 //------------------------------------------------------------------------------
@@ -549,7 +581,7 @@ bool scatter_lambertian(
     ScatterInfo* scatter_info,
     const Ray ray,
     const HitInfo hit_info,
-    rand_state* rand_state)
+    RandState* rand_state)
 {
     assert(hit_info.material.type == MATERIAL_LAMBERTIAN);
 
@@ -572,7 +604,7 @@ bool scatter_metal(
     ScatterInfo* scatter_info,
     const Ray ray,
     const HitInfo hit_info,
-    rand_state* rand_state)
+    RandState* rand_state)
 {
     assert(hit_info.material.type == MATERIAL_METAL);
 
@@ -606,7 +638,7 @@ bool scatter_dielectric(
     ScatterInfo* scatter_info,
     const Ray ray,
     const HitInfo hit_info,
-    rand_state* rand_state)
+    RandState* rand_state)
 {
     assert(hit_info.material.type == MATERIAL_DIELECTRIC);
 
@@ -621,7 +653,7 @@ bool scatter_dielectric(
 
     // Obtain sin theta to check for total internal reflection
     const Vec3 unit_v = normalize_vec3(ray.direction);
-    const f32 cos_theta = min( dot_vec3(scale_vec3(unit_v, -1.0f), surface_normal), 1.0f);
+    const f32 cos_theta = fminf( dot_vec3(scale_vec3(unit_v, -1.0f), surface_normal), 1.0f);
     const f32 sin_theta = sqrtf(1.0f - (cos_theta * cos_theta));
 
     const bool will_reflect = ( (ni_over_nt * sin_theta > 1.0f)
@@ -719,7 +751,8 @@ bool hit_test(
 //------------------------------------------------------------------------------
 // Camera
 //------------------------------------------------------------------------------
-typedef struct
+typedef struct Camera Camera;
+struct Camera
 {
     Vec3 position;
     Vec3 top_left;
@@ -728,7 +761,7 @@ typedef struct
     Vec3 w;
     Vec2 px_scale;
     f32 lens_radius;
-} Camera;
+};
 
 //------------------------------------------------------------------------------
 Camera create_camera(
@@ -788,21 +821,21 @@ Camera create_camera(
 //------------------------------------------------------------------------------
 // Path tracing
 //------------------------------------------------------------------------------
-Ray generate_ray(const Camera camera, const i32 x, const i32 y, rand_state* rand_state)
+Ray generate_ray(const Camera* camera, const i32 x, const i32 y, RandState* rand_state)
 {
     // Random starting position on lens aperture
-    const Vec3 rd = scale_vec3(rand_vec3_in_unit_disc(rand_state), camera.lens_radius);
-    const Vec3 aperture_offset_u = scale_vec3(camera.u, rd.x);
-    const Vec3 aperture_offset_v = scale_vec3(camera.v, rd.y);
+    const Vec3 rd = scale_vec3(rand_vec3_in_unit_disc(rand_state), camera->lens_radius);
+    const Vec3 aperture_offset_u = scale_vec3(camera->u, rd.x);
+    const Vec3 aperture_offset_v = scale_vec3(camera->v, rd.y);
     const Vec3 aperture_offset = add_vec3(aperture_offset_u, aperture_offset_v);
 
     // The point that corresponds to on the frustum plane
-    const Vec3 horiz = scale_vec3(camera.u, (x + rand_f32(rand_state)) * camera.px_scale.x);
-    const Vec3 vert  = scale_vec3(camera.v, (y + rand_f32(rand_state)) * camera.px_scale.y);
-    Vec3 to_pixel = add_vec3(camera.top_left, horiz);
+    const Vec3 horiz = scale_vec3(camera->u, (x + rand_f32(rand_state)) * camera->px_scale.x);
+    const Vec3 vert  = scale_vec3(camera->v, (y + rand_f32(rand_state)) * camera->px_scale.y);
+    Vec3 to_pixel = add_vec3(camera->top_left, horiz);
     to_pixel = subtract_vec3(to_pixel, vert);
 
-    const Vec3 ray_start = add_vec3(camera.position, aperture_offset);
+    const Vec3 ray_start = add_vec3(camera->position, aperture_offset);
     const Vec3 ray_dir = subtract_vec3(to_pixel, ray_start);
     return (Ray)
     {
@@ -815,7 +848,7 @@ Ray generate_ray(const Camera camera, const i32 x, const i32 y, rand_state* rand
 Vec3 calc_color(
     const Ray ray,
     const Scene* scene,
-    rand_state* rand_state,
+    RandState* rand_state,
     u32 call_depth)
 {
     if (call_depth > 50)
@@ -885,18 +918,89 @@ Vec3 calc_color(
 }
 
 //------------------------------------------------------------------------------
+// Threading
+//------------------------------------------------------------------------------
+typedef struct Job Job;
+struct Job
+{
+    i32 startX; // replace with buffer index?
+    i32 startY;
+    i32 width; // could be constant for the program
+    i32 height;
+    PxColor* pixels;
+};
+
+typedef struct JobQueue JobQueue;
+struct JobQueue
+{
+    Job* jobs;
+    i32 num_jobs;
+    volatile i32 next_job_idx;
+    volatile i32 num_completed_jobs;
+    Camera camera;
+    Scene scene;
+};
+
+//------------------------------------------------------------------------------
+void run_job(RandState* rand_state, Job job, Scene* scene, Camera* camera)
+{
+    assert(job.startX + job.width <= IMAGE_WIDTH);
+    assert(job.startY + job.height <= IMAGE_HEIGHT);
+
+    for (i32 x = job.startX; x < job.startX + job.width; ++x)
+    {
+        const f32 xRatio = x / (f32)IMAGE_WIDTH;
+        for (i32 y = job.startY; y < job.startY + job.height; ++y)
+        {
+            const f32 yRatio = y / (f32)IMAGE_HEIGHT;
+            Vec3 accumulated_color = { .x = 0.0f, .y = 0.0f, .z = 0.0f };
+            for (i32 sample = 0; sample < NUM_SAMPLES; ++sample)
+            {
+                const Ray ray = generate_ray(camera, x, y, rand_state);
+                const Vec3 ray_color = calc_color(ray, scene, rand_state, 0);
+                accumulated_color = add_vec3(accumulated_color, ray_color);
+            } // sample
+
+            Vec3 color = scale_vec3(accumulated_color, NUM_SAMPLES_RECIP); // Average of samples
+            color = sqrt_vec3(color);                                      // Gamma correction
+            job.pixels[y * IMAGE_WIDTH + x] = (PxColor)
+            {
+                .red = (u8)(color.x * UINT8_MAX),
+                .green = (u8)(color.y * UINT8_MAX),
+                .blue = (u8)(color.z * UINT8_MAX),
+                .alpha = UINT8_MAX,
+            };
+        }
+    }
+}
+
+void process_jobs_until_queue_empty(JobQueue* job_queue)
+{
+    RandState rand_state = create_rand_state();
+    i32 job_idx = locked_increment_and_return_previous(&job_queue->next_job_idx);
+
+    while (job_idx < job_queue->num_jobs)
+    {
+        run_job(&rand_state, job_queue->jobs[job_idx], &job_queue->scene, &job_queue->camera);
+        i32 num_completed = locked_increment_and_return_previous(&job_queue->num_completed_jobs);
+        printf("\r %d%% completed", 100 * (i32)num_completed / job_queue->num_jobs);
+        fflush(stdout);
+
+        job_idx = locked_increment_and_return_previous(&job_queue->next_job_idx);
+    }
+}
+
+//------------------------------------------------------------------------------
+
+
+//------------------------------------------------------------------------------
 int main(void)
 {
-    const f32 num_samples_recip = 1.0f / NUM_SAMPLES;
-    i32 ret;
     PxColor* pixels = malloc(sizeof(PxColor[IMAGE_WIDTH * IMAGE_HEIGHT]));
 
-    // Random
-    struct xorshift128p_state rand_state = create_rand_state();
-
     // Scene
-    Scene scene;
-    create_random_scene(&scene, &rand_state);
+    struct xorshift128p_state rand_state = create_rand_state();
+    Scene scene = create_random_scene(&rand_state);
 
     // Camera
     const Vec3 camera_pos  = { .x = 13.0f, .y = 2.0f, .z = 3.0f };
@@ -907,7 +1011,44 @@ int main(void)
     const f32 aperture     = 0.1f;
     const f32 focus_dist   = 10.0f;  // TODO: Investigate: Changing this affects background gradient, because it effectively shrinks the vertical_fov. Is that expected from focus_dist?
 
-    Camera camera = create_camera(
+    printf("Configuration: num_threads: %d, num_samples: %d, resolution: %d x %d, tile_width: %d\n\n",
+        NUM_THREADS, NUM_SAMPLES, IMAGE_WIDTH, IMAGE_HEIGHT, TILE_WIDTH);
+    printf("Reticulating splines...\n");
+    struct timespec t0;
+    i32 ret = timespec_get(&t0, TIME_UTC);
+
+    const i32 x_steps = (IMAGE_WIDTH + TILE_WIDTH - 1) / TILE_WIDTH;
+    const i32 y_steps = (IMAGE_HEIGHT + TILE_WIDTH - 1) / TILE_WIDTH;
+
+    // Create jobs
+    JobQueue job_queue;
+    job_queue.num_jobs = x_steps * y_steps;
+    job_queue.jobs = malloc(sizeof(Job) * job_queue.num_jobs);
+    job_queue.next_job_idx = 0;
+    job_queue.num_completed_jobs = 0;
+
+    i32 x = 0;
+    i32 y = 0;
+    for (i32 job_idx = 0; job_idx < job_queue.num_jobs; ++job_idx)
+    {
+        assert(x < IMAGE_WIDTH);
+        assert(y < IMAGE_HEIGHT);
+        job_queue.jobs[job_idx] = (Job)
+        {
+            .startX = x,
+            .startY = y,
+            .width = imin(TILE_WIDTH, IMAGE_WIDTH - x),
+            .height = imin(TILE_WIDTH, IMAGE_HEIGHT - y),
+            .pixels = pixels
+        };
+        x += TILE_WIDTH;
+        if (x >= IMAGE_WIDTH)
+        {
+            x = 0;
+            y += TILE_WIDTH;
+        }
+    }
+    job_queue.camera = create_camera(
         camera_pos,
         look_at_pos,
         v_up,
@@ -918,39 +1059,19 @@ int main(void)
         aperture,
         focus_dist
     );
+    job_queue.scene = scene;
 
-    printf("Reticulating splines...\n");
-    struct timespec t0;
-    ret = timespec_get(&t0, TIME_UTC);
-    
-    // Output Image
-    for (i32 x = 0; x < IMAGE_WIDTH; ++x)
+    // Run jobs on threads and wait for completion
+    dispatch_jobs(&job_queue, NUM_THREADS);
+    while (job_queue.num_completed_jobs < job_queue.num_jobs)
     {
-        const f32 xRatio = x / (f32)IMAGE_WIDTH;
-        for (i32 y = 0; y < IMAGE_HEIGHT; ++y)
-        {
-            const f32 yRatio = y / (f32)IMAGE_HEIGHT;
-            Vec3 accumulated_color = { .x = 0.0f, .y = 0.0f, .z = 0.0f };
-            for (i32 sample = 0; sample < NUM_SAMPLES; ++sample)
-            {
-                const Ray ray        = generate_ray(camera, x, y, &rand_state);
-                const Vec3 ray_color = calc_color(ray, &scene, &rand_state, 0);
-                accumulated_color    = add_vec3(accumulated_color, ray_color);
-            } // sample
+        sleep_for_ms(500);
+    }
 
-            Vec3 color = scale_vec3(accumulated_color, num_samples_recip); // Average of samples
-            color = sqrt_vec3(color);                                      // Gamma correction
-            pixels[y * IMAGE_WIDTH + x] = (PxColor)
-            {
-                .red   = (u8)(color.x * UINT8_MAX),
-                .green = (u8)(color.y * UINT8_MAX),
-                .blue  = (u8)(color.z * UINT8_MAX),
-                .alpha = UINT8_MAX,
-            };
-        } // y
-    } // x
+    free(job_queue.jobs);
+    free(scene.spheres);
 
-  // Save the image to a file
+    // Save the image to a file
     ret = stbi_write_bmp(
         IMAGE_FILENAME,
         IMAGE_WIDTH,
@@ -962,16 +1083,16 @@ int main(void)
 
     if (ret == 0)
     {
-        printf("FAILED writing to file: {}\n");
+        printf("\nFAILED writing to file: %s\n", IMAGE_FILENAME);
     }
     else
     {
-        printf("Successfuly written file: {}\n");
+        printf("\nSuccessfuly written file: %s\n", IMAGE_FILENAME);
     }
 
     struct timespec t1;
     ret = timespec_get(&t1, TIME_UTC);
     double seconds_elapsed = (double)t1.tv_sec - t0.tv_sec;
-    printf("Render Time: %.fs\n", seconds_elapsed);
+    printf("\nRender Time: %.fs\n", seconds_elapsed);
     return 0;
 }
